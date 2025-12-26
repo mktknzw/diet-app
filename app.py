@@ -7,19 +7,15 @@ import sqlite3
 from datetime import datetime, timedelta
 import pandas as pd
 from PIL import Image
+import time
 
 # ==========================================
-# 👇 ここにAPIキーを入れてください
+# 👇 APIキー
 # ==========================================
-# Streamlitの「金庫」からキーを取り出す設定
-# ※ ローカル（自分のPC）で動かすときは、ここに直接キーを入れるか、secrets.tomlというファイルを作りますが、
-#    公開用はこれでOKです。
-try:
-    API_KEY = st.secrets["GEMINI_API_KEY"]
-except:
-    # 自分のPCでテストする用 (公開時は消してもOKですが、残しておくと便利)
-    API_KEY = "AIzaSyDFtXBreE4btuCc-sugDCiDKXNbv_biSu8"
+API_KEY = "AIzaSyDFtXBreE4btuCc-sugDCiDKXNbv_biSu8"
+# ==========================================
 
+MODEL_NAME = "models/gemini-2.5-flash"
 genai.configure(api_key=API_KEY)
 
 # ==========================================
@@ -298,6 +294,4 @@ def main():
                     st.divider()
 
 if __name__ == "__main__":
-
     main()
-
