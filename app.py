@@ -16,9 +16,6 @@ try:
 except:
     API_KEY = ""
 
-# 🟢 バージョン0.8.3で確実に動作するモデルを指定
-MODEL_NAME = "models/gemini-1.5-flash"
-
 if API_KEY:
     genai.configure(api_key=API_KEY)
 
@@ -71,44 +68,57 @@ def get_db(query, args=()):
     return df
 
 # ==========================================
-# 🧠 AI解析ロジック
+# 🧠 AI解析ロジック（総当たり・フォールバック機能）
 # ==========================================
 def analyze_food(text_or_image):
     if not API_KEY:
         st.error("SecretsにAPIキーが設定されていません。")
         return None
     
-    try:
-        # Prompt (英語で指定して安定化)
-        prompt = """
-        Analyze food items. Estimate Calories, Protein(P), Fat(F), Carbs(C).
-        If specific values are given (e.g. "Protein 20g"), use them.
-        Output ONLY a JSON list:
-        [{"food_name": "Item Name", "calories": 0, "protein": 0, "fat": 0, "carbs": 0}]
-        """
+    # 🟢 【対策】試すモデルの優先順位リスト
+    # 1.5-flash がダメなら、確実に動く gemini-pro へ自動で切り替える
+    candidate_models = ["gemini-1.5-flash", "gemini-pro"]
 
-        model = genai.GenerativeModel(MODEL_NAME)
+    prompt = """
+    Analyze food items. Estimate Calories, Protein(P), Fat(F), Carbs(C).
+    If specific values are given (e.g. "Protein 20g"), use them.
+    Output ONLY a JSON list:
+    [{"food_name": "Item Name", "calories": 0, "protein": 0, "fat": 0, "carbs": 0}]
+    """
 
-        if isinstance(text_or_image, str):
-            # テキストの場合
-            res = model.generate_content(f"Input: {text_or_image}. {prompt}")
-        else:
-            # 画像の場合
-            res = model.generate_content([prompt, text_or_image])
+    last_error = None
+
+    for model_name in candidate_models:
+        try:
+            model = genai.GenerativeModel(model_name)
             
-        match = re.search(r'\[.*\]', res.text, re.DOTALL)
-        if match:
-            return json.loads(match.group(0))
-        
-        match_single = re.search(r'\{.*\}', res.text, re.DOTALL)
-        if match_single:
-            return [json.loads(match_single.group(0))]
-        
-        return None
+            # 画像かテキストかで処理を分ける
+            if isinstance(text_or_image, str):
+                # テキスト
+                res = model.generate_content(f"Input: {text_or_image}. {prompt}")
+            else:
+                # 画像 (gemini-proは画像不可なのでスキップして次のモデルへ)
+                if model_name == "gemini-pro":
+                    continue
+                res = model.generate_content([prompt, text_or_image])
+            
+            # ここまで来たら成功！JSONを取り出す
+            match = re.search(r'\[.*\]', res.text, re.DOTALL)
+            if match:
+                return json.loads(match.group(0))
+            
+            match_single = re.search(r'\{.*\}', res.text, re.DOTALL)
+            if match_single:
+                return [json.loads(match_single.group(0))]
+                
+        except Exception as e:
+            # 失敗したらエラーを記録して、次のモデル（gemini-pro）を試す
+            last_error = e
+            continue
 
-    except Exception as e:
-        st.error(f"AI Error: {e}")
-        return None
+    # 全滅した場合
+    st.error(f"AI Error: すべてのモデルで失敗しました。詳細: {last_error}")
+    return None
 
 # ==========================================
 # 📱 アプリメイン処理
@@ -256,7 +266,6 @@ def main():
         st.subheader("今日のバランス")
         if sum_cal > 0:
             fig, ax = plt.subplots(figsize=(4, 4))
-            # 豆腐文字回避のためラベルは英語
             ax.pie([sum_p, sum_f, sum_c], labels=['Protein', 'Fat', 'Carbs'], 
                    colors=['#ff9999', '#66b3ff', '#99ff99'], autopct='%1.1f%%', startangle=90)
             st.pyplot(fig)
