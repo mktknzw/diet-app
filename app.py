@@ -104,7 +104,6 @@ def analyze_food(text_or_image):
         return None
 
     except Exception as e:
-        # ここがエラーの原因でした。インデントを修正しました。
         st.error(f"AI Error: {e}")
         return None
 
@@ -274,3 +273,30 @@ def main():
         st.caption("Protein")
         fig2, ax2 = plt.subplots(figsize=(6, 3))
         ax2.plot(df_week.index, df_week["Protein"], marker='o', label='Intake')
+        ax2.axhline(target_p, color='red', linestyle='--', label='Target')
+        plt.xticks(rotation=45)
+        ax2.legend()
+        st.pyplot(fig2)
+
+    # Tab 4
+    with tab4:
+        if not df_m.empty:
+            for i, r in df_m.iterrows():
+                with st.container():
+                    c1, c2 = st.columns([3, 1])
+                    c1.markdown(f"**{r['name']}**")
+                    c1.caption(f"🔥{int(r['kcal'])} | P:{int(r['p'])} | F:{int(r['f'])} | C:{int(r['c'])}")
+                    bc1, bc2 = c2.columns(2)
+                    if bc1.button("⭐️", key=f"fav_{r['id']}"):
+                        execute_db("INSERT INTO favorites (name, kcal, p, f, c) VALUES (?, ?, ?, ?, ?)",
+                                   (r['name'], r['kcal'], r['p'], r['f'], r['c']))
+                        st.success("Saved!")
+                    if bc2.button("🗑️", key=f"del_{r['id']}"):
+                        execute_db("DELETE FROM meals WHERE id=?", (r['id'],))
+                        st.rerun()
+                    st.divider()
+        else:
+            st.info("No records today")
+
+if __name__ == "__main__":
+    main()
