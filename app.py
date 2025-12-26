@@ -19,6 +19,8 @@ try:
 except:
     # 自分のPCでテストする用 (公開時は消してもOKですが、残しておくと便利)
     API_KEY = "AIzaSyDFtXBreE4btuCc-sugDCiDKXNbv_biSu8"
+
+genai.configure(api_key=API_KEY)
 import streamlit as st
 import google.generativeai as genai
 import json
@@ -315,4 +317,5 @@ def main():
                     st.divider()
 
 if __name__ == "__main__":
+
     main()
