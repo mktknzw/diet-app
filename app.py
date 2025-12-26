@@ -7,16 +7,18 @@ import sqlite3
 from datetime import datetime, timedelta
 import pandas as pd
 from PIL import Image
+import time
 
 # ==========================================
-# 🔑 APIキー設定 (安定版)
+# 🔑 APIキー設定 (Streamlit Cloudの金庫から読み込む)
 # ==========================================
 try:
+    # 公開環境（Streamlit Cloud）用
     API_KEY = st.secrets["GEMINI_API_KEY"]
 except:
-    API_KEY = "AIzaSyDFtXBreE4btuCc-sugDCiDKXNbv_biSu8" 
+    # 自分のPCでのテスト用（もしローカルで動かしたい場合はここにキーを入れる）
+    API_KEY = "AIzaSyDFtXBreE4btuCc-sugDCiDKXNbv_biSu8"
 
-# 🟢 最も安定している 1.5-flash にモデル名を変更
 MODEL_NAME = "models/gemini-1.5-flash"
 genai.configure(api_key=API_KEY)
 
@@ -33,6 +35,7 @@ st.markdown("""
         border-radius: 10px;
         text-align: center;
         border: 1px solid #eee;
+        box-shadow: 2px 2px 5px rgba(0,0,0,0.05);
     }
     .big-font { font-size: 20px; font-weight: bold; }
     </style>
@@ -99,115 +102,185 @@ def analyze_food(text_or_image):
     try:
         model = genai.GenerativeModel(MODEL_NAME)
         prompt = """
-        Analyze food and estimate PFC. 
-        If specific values (e.g. 20g protein) given, prioritize them.
-        Output ONLY JSON: [{"food_name": "name", "calories": 0, "protein": 0, "fat": 0, "carbs": 0}]
+        食事品目を分解し、カロリーとPFCを推定して。
+        具体的数値（例:タンパク質20g）があれば絶対優先して逆算すること。
+        JSONリスト形式のみ出力: [{"food_name": "品目名", "calories": 0, "protein": 0, "fat": 0, "carbs": 0}]
         """
         if isinstance(text_or_image, str):
-            res = model.generate_content(f"Input: {text_or_image}. {prompt}")
+            res = model.generate_content(f"入力: {text_or_image}。{prompt}")
         else:
             res = model.generate_content([prompt, text_or_image])
         match = re.search(r'\[.*\]', res.text, re.DOTALL)
         return json.loads(match.group(0)) if match else None
-    except Exception as e:
-        st.error(f"AI Connection Error: {e}")
-        return None
+    except: return None
 
 # ==========================================
 # 📱 メイン処理
 # ==========================================
 def main():
     init_db()
+    
     if 'draft_data' not in st.session_state: st.session_state['draft_data'] = None
 
     st.title("🥗 BodyLog AI Ultimate")
 
+    # --- サイドバー (設定) ---
     with st.sidebar:
-        st.header("Settings")
-        cur_w = st.number_input("Weight (kg)", 30.0, 150.0, 65.0)
-        with st.expander("Details", expanded=True):
-            gender = st.radio("Gender", ["Male", "Female"], horizontal=True)
-            age = st.number_input("Age", 18, 100, 30)
-            height = st.number_input("Height (cm)", 100.0, 250.0, 170.0)
-            act = st.selectbox("Activity", [("Low", 1.2), ("Mid", 1.55), ("High", 1.725)], format_func=lambda x:x[0])[1]
-            goal = st.selectbox("Goal", [("Maintain", 0), ("Lose", -500), ("Gain", 300)], format_func=lambda x:x[0])[1]
-        p_ratio = st.slider("Protein Ratio (x kg)", 1.0, 2.5, 1.6)
+        st.header("⚙️ プロフィール設定")
+        current_weight = st.number_input("現在の体重 (kg)", 30.0, 150.0, 65.0)
+        
+        with st.expander("📏 詳細設定", expanded=True):
+            gender = st.radio("性別", ["男性", "女性"], horizontal=True)
+            age = st.number_input("年齢", 18, 100, 30)
+            height = st.number_input("身長 (cm)", 100.0, 250.0, 170.0)
+            act_opts = [("運動なし(x1.2)", 1.2), ("週1-3(x1.375)", 1.375), ("週3-5(x1.55)", 1.55), ("毎日(x1.725)", 1.725)]
+            act_val = st.selectbox("活動レベル", act_opts, format_func=lambda x: x[0])
+            goal_opts = [("維持(±0)", 0), ("ダイエット(-500)", -500), ("増量(+300)", 300)]
+            goal_val = st.selectbox("目的", goal_opts, format_func=lambda x: x[0])
 
-    # Calculation
-    bmr = (10*cur_w + 6.25*height - 5*age + 5) if gender=='Male' else (10*cur_w + 6.25*height - 5*age - 161)
-    target_k = int(bmr * act + goal)
-    target_p = int(cur_w * p_ratio)
+        st.divider()
+        p_target_ratio = st.slider("タンパク質目標 (体重 x ?)", 1.0, 2.5, 1.6)
+        
+        # CSVエクスポート
+        st.divider()
+        conn = sqlite3.connect(DB_NAME)
+        df_export = pd.read_sql_query("SELECT * FROM meals", conn)
+        conn.close()
+        csv = df_export.to_csv(index=False).encode('utf-8')
+        st.download_button("💾 CSV保存", csv, "diet_log.csv", "text/csv")
 
-    # Dashboard
-    today = datetime.now().strftime('%Y-%m-%d')
-    df_m, _ = get_daily_data(today)
-    sum_k, sum_p, sum_f, sum_c = (df_m['kcal'].sum() or 0), (df_m['p'].sum() or 0), (df_m['f'].sum() or 0), (df_m['c'].sum() or 0)
+    # 目標計算 (Mifflin-St Jeor式)
+    if gender == '男性':
+        bmr = (10 * current_weight) + (6.25 * height) - (5 * age) + 5
+    else:
+        bmr = (10 * current_weight) + (6.25 * height) - (5 * age) - 161
+    target_kcal = int(bmr * act_val[1] + goal_val[1])
+    target_p = int(current_weight * p_target_ratio)
 
-    st.caption(f"Goal: {target_k} kcal / Protein: {target_p} g")
+    # --- ダッシュボード ---
+    today_str = datetime.now().strftime('%Y-%m-%d')
+    df_m, df_e = get_daily_data(today_str)
+    
+    cur_cal = df_m['kcal'].sum() if not df_m.empty else 0
+    cur_p = df_m['p'].sum() if not df_m.empty else 0
+    cur_f = df_m['f'].sum() if not df_m.empty else 0
+    cur_c = df_m['c'].sum() if not df_m.empty else 0
+
+    st.caption(f"目標: {target_kcal}kcal (P目標: {target_p}g)")
+
     c1, c2 = st.columns(2)
-    c1.markdown(f'<div class="metric-card">Remaining Cal<br><span class="big-font">{int(target_k - sum_k)}</span></div>', unsafe_allow_html=True)
-    c2.markdown(f'<div class="metric-card">Remaining P<br><span class="big-font" style="color:{"green" if target_p-sum_p<=0 else "red"}">{max(0, int(target_p-sum_p))}g</span></div>', unsafe_allow_html=True)
+    with c1:
+        rem_cal = target_kcal - cur_cal
+        st.markdown(f'<div class="metric-card">残りCal<br><span class="big-font">{int(rem_cal)}</span></div>', unsafe_allow_html=True)
+        st.progress(min(cur_cal/target_kcal, 1.0) if target_kcal>0 else 0)
+    with c2:
+        rem_p = target_p - cur_p
+        color = "green" if rem_p <= 0 else "red"
+        st.markdown(f'<div class="metric-card">残りProtein<br><span class="big-font" style="color:{color}">{max(0, int(rem_p))}g</span></div>', unsafe_allow_html=True)
+        st.progress(min(cur_p/target_p, 1.0) if target_p>0 else 0)
 
-    tab1, tab2, tab3, tab4 = st.tabs(["📝 Input", "⭐️ MyMenu", "📊 Report", "🗑️ History"])
+    # --- タブ ---
+    tab1, tab2, tab3, tab4 = st.tabs(["📝 記録", "⭐️ マイメニュー", "📊 分析", "🗑️ 履歴"])
 
+    # Tab 1: 記録
     with tab1:
         if st.session_state['draft_data'] is None:
-            txt = st.text_input("What did you eat?")
-            if st.button("Analyze", type="primary") and txt:
-                with st.spinner("Analyzing..."):
-                    res = analyze_food(txt)
-                    if res: st.session_state['draft_data'] = res; st.rerun()
-            img = st.file_uploader("Or Upload Photo", type=["jpg","png","jpeg"])
-            if img and st.button("Analyze Photo"):
-                with st.spinner("AI Processing..."):
-                    res = analyze_food(Image.open(img))
-                    if res: st.session_state['draft_data'] = res; st.rerun()
+            in_type = st.radio("入力", ["文字", "写真"], horizontal=True)
+            if in_type == "文字":
+                txt = st.text_input("食事内容", placeholder="例: 鮭定食")
+                if st.button("解析する", type="primary") and txt:
+                    with st.spinner("AI解析中..."):
+                        res = analyze_food(txt)
+                        if res:
+                            st.session_state['draft_data'] = res
+                            st.rerun()
+            else:
+                img = st.file_uploader("画像", type=["jpg","png","jpeg"])
+                if img and st.button("解析する", type="primary"):
+                    with st.spinner("画像解析中..."):
+                        res = analyze_food(Image.open(img))
+                        if res:
+                            st.session_state['draft_data'] = res
+                            st.rerun()
         else:
-            with st.form("edit"):
+            st.subheader("🧐 確認・修正")
+            with st.form("edit_form"):
                 edited = []
                 for idx, item in enumerate(st.session_state['draft_data']):
-                    st.markdown(f"**Item {idx+1}**")
-                    cols = st.columns([3, 1, 1, 1, 1])
-                    n = cols[0].text_input("Name", item['food_name'], key=f"n_{idx}")
-                    k = cols[1].number_input("kcal", 0, 5000, int(item['calories']), key=f"k_{idx}")
-                    p = cols[2].number_input("P", 0, 500, int(item['protein']), key=f"p_{idx}")
-                    f = cols[3].number_input("F", 0, 500, int(item['fat']), key=f"f_{idx}")
-                    c = cols[4].number_input("C", 0, 500, int(item['carbs']), key=f"c_{idx}")
+                    st.markdown(f"**品目 {idx+1}**")
+                    c1, c2, c3, c4, c5 = st.columns([3, 1.5, 1, 1, 1])
+                    n = c1.text_input("名前", item['food_name'], key=f"n_{idx}")
+                    k = c2.number_input("kcal", 0, 5000, int(item['calories']), key=f"k_{idx}")
+                    p = c3.number_input("P(g)", 0, 500, int(item['protein']), key=f"p_{idx}")
+                    f = c4.number_input("F(g)", 0, 500, int(item['fat']), key=f"f_{idx}")
+                    c = c5.number_input("C(g)", 0, 500, int(item['carbs']), key=f"c_{idx}")
                     edited.append({"food_name": n, "calories": k, "protein": p, "fat": f, "carbs": c})
-                if st.form_submit_button("✅ Save"):
-                    for i in edited: add_meal(i['food_name'], i['calories'], i['protein'], i['fat'], i['carbs'])
-                    st.session_state['draft_data'] = None; st.rerun()
-                if st.form_submit_button("❌ Cancel"):
-                    st.session_state['draft_data'] = None; st.rerun()
+                    st.divider()
+                
+                bc1, bc2 = st.columns(2)
+                if bc1.form_submit_button("✅ 保存", type="primary"):
+                    for i in edited:
+                        add_meal(i['food_name'], i['calories'], i['protein'], i['fat'], i['carbs'])
+                    st.session_state['draft_data'] = None
+                    st.success("保存完了")
+                    st.rerun()
+                if bc2.form_submit_button("❌ キャンセル"):
+                    st.session_state['draft_data'] = None
+                    st.rerun()
 
+    # Tab 2: マイメニュー
     with tab2:
+        st.subheader("⭐️ よく食べるもの")
         favs = get_favorites()
         if not favs.empty:
-            sel = st.selectbox("Select", favs['name'])
-            if st.button("Add Today"):
-                f = favs[favs['name']==sel].iloc[0]
-                add_meal(f['name'], f['kcal'], f['p'], f['f'], f['c']); st.rerun()
-        else: st.info("Use ⭐️ in History tab to save menu.")
+            sel = st.selectbox("選択", favs['name'])
+            tgt = favs[favs['name'] == sel].iloc[0]
+            st.info(f"{int(tgt['kcal'])}kcal (P:{int(tgt['p'])} F:{int(tgt['f'])} C:{int(tgt['c'])})")
+            if st.button("これ食べた！"):
+                add_meal(tgt['name'], tgt['kcal'], tgt['p'], tgt['f'], tgt['c'])
+                st.success("記録しました")
+                st.rerun()
+        else:
+            st.info("履歴タブの⭐️ボタンで登録できます")
 
+    # Tab 3: 分析
     with tab3:
-        if sum_k > 0:
-            # 🟢 日本語フォントなしでもOKなようにラベルを英語に変更
-            fig, ax = plt.subplots(figsize=(4,4))
-            ax.pie([sum_p, sum_f, sum_c], labels=['P','F','C'], colors=['#ff9999','#66b3ff','#99ff99'], autopct='%1.1f%%')
-            st.pyplot(fig)
-        df_w = get_weekly_summary()
-        st.bar_chart(df_w.set_index("date")["intake"])
+        st.subheader("今日のPFCバランス")
+        if cur_cal > 0:
+            fig_pie, ax_pie = plt.subplots(figsize=(4, 4))
+            ax_pie.pie([cur_p, cur_f, cur_c], labels=['P', 'F', 'C'], colors=['#ff9999', '#66b3ff', '#99ff99'], autopct='%1.1f%%', startangle=90)
+            st.pyplot(fig_pie)
+        else:
+            st.info("今日のデータがまだありません")
 
+        st.divider()
+        df_w = get_weekly_summary()
+        st.subheader("週間摂取カロリー")
+        st.bar_chart(df_w.set_index("date")[["intake"]])
+        
+        st.subheader("週間タンパク質推移")
+        fig, ax = plt.subplots(figsize=(8,3))
+        ax.plot(df_w['date'], df_w['protein'], marker='o', label='P摂取量')
+        ax.axhline(target_p, color='red', linestyle='--', label='目標')
+        ax.legend()
+        st.pyplot(fig)
+
+    # Tab 4: 履歴
     with tab4:
         if not df_m.empty:
-            for _, r in df_m.iterrows():
-                c1, c2 = st.columns([4, 1])
-                c1.write(f"**{r['name']}** {int(r['kcal'])}kcal | P:{int(r['p'])} F:{int(r['f'])} C:{int(r['c'])}")
-                if c2.button("🗑️", key=f"d_{r['id']}"):
-                    conn = sqlite3.connect(DB_NAME); cursor = conn.cursor()
-                    cursor.execute("DELETE FROM meals WHERE id=?", (r['id'],)); conn.commit(); st.rerun()
-                if c2.button("⭐️", key=f"s_{r['id']}"):
-                    add_favorite(r['name'], r['kcal'], r['p'], r['f'], r['c']); st.success("Saved!")
+            for i, r in df_m.iterrows():
+                with st.container():
+                    c1, c2 = st.columns([3, 1])
+                    c1.write(f"**{r['name']}**")
+                    c1.caption(f"🔥{int(r['kcal'])}kcal | P:{int(r['p'])}g | F:{int(r['f'])}g | C:{int(r['c'])}g")
+                    if c2.button("⭐️", key=f"fav_{r['id']}"):
+                        add_favorite(r['name'], r['kcal'], r['p'], r['f'], r['c'])
+                        st.success("登録！")
+                    if c2.button("🗑️", key=f"del_{r['id']}"):
+                        conn = sqlite3.connect(DB_NAME); cur = conn.cursor()
+                        cur.execute("DELETE FROM meals WHERE id=?", (r['id'],))
+                        conn.commit(); conn.close(); st.rerun()
+                    st.divider()
 
 if __name__ == "__main__":
     main()
