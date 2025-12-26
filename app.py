@@ -17,7 +17,7 @@ if not API_KEY:
 
 genai.configure(api_key=API_KEY)
 
-MODEL_NAME = "models/gemini-1.0-pro"
+MODEL_NAME = "gemini-pro"
 
 # ===============================
 # 💾 DB
@@ -131,5 +131,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
