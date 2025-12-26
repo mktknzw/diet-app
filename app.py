@@ -12,7 +12,11 @@ import time
 # ==========================================
 # 👇 APIキー
 # ==========================================
-API_KEY = "AIzaSyDFtXBreE4btuCc-sugDCiDKXNbv_biSu8"
+try:
+    API_KEY = st.secrets["GEMINI_API_KEY"]
+except:
+    # 自分のPCで動かす時用のバックアップ
+    API_KEY = "AIzaSyDFtXBreE4btuCc-sugDCiDKXNbv_biSu8"
 # ==========================================
 
 MODEL_NAME = "models/gemini-2.5-flash"
@@ -295,3 +299,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
