@@ -9,6 +9,7 @@ import pandas as pd
 from PIL import Image
 import io
 import base64
+import time
 
 # ==========================================
 # 🔑 APIキー設定
@@ -19,50 +20,51 @@ except:
     API_KEY = ""
 
 # ==========================================
-# 🔍 自動で使えるモデルを探す関数 (REST API)
+# 🔍 自動で使える「無料」モデルを探す関数
 # ==========================================
 def get_available_model():
     if not API_KEY:
         return None
     
-    # モデルリストを取得するURL
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
+    # 🟢 【対策】無料枠で確実に動く "Flash" シリーズだけを徹底的に試すリスト
+    # Pro系を入れると「Limit 0」のエラーになるため除外しました
+    candidate_models = [
+        "gemini-1.5-flash",
+        "gemini-1.5-flash-latest",
+        "gemini-1.5-flash-001",
+        "gemini-1.5-flash-002",
+        "gemini-1.0-pro" # どうしてもFlashがだめな時の保険
+    ]
+
+    # モデルリストを取得せず、直接「生存確認」を行う方式に変更
+    # (ListModelsAPI自体が不安定な場合があるため)
     
-    try:
-        response = requests.get(url)
-        if response.status_code != 200:
-            st.error(f"APIキーの確認に失敗しました (Error {response.status_code})。キーが無効か、Google側で制限されています。")
-            return None
-            
-        data = response.json()
-        
-        # 'generateContent' に対応しているモデルを探す
-        # 優先順位: 1.5-flash -> 1.5-pro -> 1.0-pro -> その他
-        preferred_order = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro", "gemini-1.0-pro"]
-        
-        available_models = []
-        if "models" in data:
-            for m in data["models"]:
-                # モデル名 (models/xxxx) と 対応メソッドを確認
-                if "generateContent" in m.get("supportedGenerationMethods", []):
-                    available_models.append(m["name"].replace("models/", ""))
+    base_url = "https://generativelanguage.googleapis.com/v1beta/models/"
+    headers = {"Content-Type": "application/json"}
+    dummy_payload = {
+        "contents": [{"parts": [{"text": "Hello"}]}]
+    }
 
-        # 優先順位に従ってモデルを決定
-        for p in preferred_order:
-            for a in available_models:
-                if p in a:
-                    return f"models/{a}" # 見つかった！
-        
-        # 優先モデルがない場合、リストの最初を使う
-        if available_models:
-            return f"models/{available_models[0]}"
-            
-        st.error("使えるモデルが1つも見つかりませんでした。")
-        return None
+    st.toast("🔍 最適な無料AIモデルを探索中...", icon="🤖")
 
-    except Exception as e:
-        st.error(f"モデル探索エラー: {e}")
-        return None
+    for model_name in candidate_models:
+        check_url = f"{base_url}{model_name}:generateContent?key={API_KEY}"
+        try:
+            # テスト送信
+            response = requests.post(check_url, headers=headers, data=json.dumps(dummy_payload))
+            
+            if response.status_code == 200:
+                # 成功したらこのモデルを採用！
+                return f"models/{model_name}"
+            elif response.status_code == 429:
+                # 429は「使いすぎ」または「無料枠なし」。これはスキップ
+                continue
+            
+        except:
+            continue
+
+    st.error("❌ 利用可能な無料モデルが見つかりませんでした。Google AI StudioでAPIキーの設定を確認するか、1分待ってから再試行してください。")
+    return None
 
 # ==========================================
 # 🧠 AI解析ロジック (REST API直接通信)
@@ -72,8 +74,11 @@ def analyze_food(text_or_image):
         st.error("SecretsにAPIキーが設定されていません。")
         return None
 
-    # 🟢 毎回、使えるモデルを確認してから投げる
-    model_name = get_available_model()
+    # 🟢 毎回、使えるモデルを確認してから投げる (キャッシュしても良いが安全重視)
+    if 'cached_model' not in st.session_state:
+        st.session_state['cached_model'] = get_available_model()
+    
+    model_name = st.session_state['cached_model']
     if not model_name:
         return None
 
@@ -112,20 +117,32 @@ def analyze_food(text_or_image):
     try:
         response = requests.post(url, headers=headers, data=json.dumps(payload))
         
+        # 🟢 エラーハンドリング強化
+        if response.status_code == 429:
+            st.warning("⚠️ Googleの無料枠制限(速度制限)にかかりました。約60秒待ってから再試行してください。")
+            return None
+        
         if response.status_code != 200:
             st.error(f"Google Error ({model_name}): {response.text}")
+            # エラーが出たらキャッシュをクリアして次回再探索
+            del st.session_state['cached_model']
             return None
 
         result_json = response.json()
         try:
+            # 応答の検証
+            if "candidates" not in result_json or not result_json["candidates"]:
+                st.error("AIが回答を拒否しました（不適切なコンテンツと判定された可能性があります）。")
+                return None
+                
             text_response = result_json["candidates"][0]["content"]["parts"][0]["text"]
             match = re.search(r'\[.*\]', text_response, re.DOTALL)
             if match: return json.loads(match.group(0))
             match_s = re.search(r'\{.*\}', text_response, re.DOTALL)
             if match_s: return [json.loads(match_s.group(0))]
             return None
-        except:
-            st.error("AIからの応答を解析できませんでした。")
+        except Exception as e:
+            st.error(f"解析エラー: {e}")
             return None
 
     except Exception as e:
@@ -187,7 +204,7 @@ def main():
     init_db()
     if 'draft_data' not in st.session_state: st.session_state['draft_data'] = None
 
-    st.title("🥗 BodyLog AI (Auto)")
+    st.title("🥗 BodyLog AI (Free)")
 
     # --- サイドバー ---
     with st.sidebar:
@@ -308,7 +325,7 @@ def main():
     with tab2:
         favs = get_db("SELECT * FROM favorites")
         if not favs.empty:
-            sel_fav = st.selectbox("マイメニュー", favs['name'])
+            sel_fav = st.selectbox("My Menu", favs['name'])
             target = favs[favs['name'] == sel_fav].iloc[0]
             st.success(f"{target['name']} : {int(target['kcal'])}kcal")
             if st.button("これ食べた！ (追加)"):
