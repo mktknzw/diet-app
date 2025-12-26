@@ -26,15 +26,14 @@ def analyze_food(text_or_image):
         st.error("SecretsにAPIキーが設定されていません。")
         return None
 
-    # 🟢 接続先URL (ライブラリを使わず直接叩く)
-    # gemini-1.5-flash を指定
+    # 🟢 Googleのサーバーの住所 (直接指定)
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={API_KEY}"
     
     headers = {
         "Content-Type": "application/json"
     }
 
-    # プロンプト
+    # プロンプト (AIへの命令)
     system_instruction = """
     Analyze food items. Estimate Calories, Protein(P), Fat(F), Carbs(C).
     If specific values are given (e.g. "Protein 20g"), use them.
@@ -42,7 +41,7 @@ def analyze_food(text_or_image):
     [{"food_name": "Item Name", "calories": 0, "protein": 0, "fat": 0, "carbs": 0}]
     """
 
-    # データ（Payload）の作成
+    # 送信するデータの作成
     payload = {}
 
     if isinstance(text_or_image, str):
@@ -54,7 +53,7 @@ def analyze_food(text_or_image):
         }
     else:
         # --- 画像の場合 ---
-        # 画像をBase64という文字データに変換
+        # 画像を文字データ(Base64)に変換して直接送る
         buffered = io.BytesIO()
         text_or_image.save(buffered, format="JPEG")
         img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
@@ -74,22 +73,21 @@ def analyze_food(text_or_image):
         }
 
     try:
-        # 🟢 直接POSTリクエスト送信
+        # 🟢 ここでGoogleに直接データを投げる！
         response = requests.post(url, headers=headers, data=json.dumps(payload))
         
-        # 結果の確認
+        # もしエラーが返ってきたら、その「生の理由」を表示する
         if response.status_code != 200:
-            # エラーならその内容を表示 (404などの原因がこれで生々しく分かります)
-            st.error(f"Server Error ({response.status_code}): {response.text}")
+            st.error(f"Google Server Error ({response.status_code}): {response.text}")
             return None
 
-        # JSONの解読
+        # 成功したらデータを取り出す
         result_json = response.json()
         try:
             # AIの回答テキストを取り出す
             text_response = result_json["candidates"][0]["content"]["parts"][0]["text"]
             
-            # JSON部分を抽出
+            # JSON部分を探して取り出す
             match = re.search(r'\[.*\]', text_response, re.DOTALL)
             if match:
                 return json.loads(match.group(0))
@@ -101,7 +99,7 @@ def analyze_food(text_or_image):
             return None
 
         except (KeyError, IndexError) as e:
-            st.error(f"データ解析エラー: AIからの応答形式が予期しないものでした。詳細: {e}")
+            st.error("AIからの応答が空でした。画像が読み取れなかった可能性があります。")
             return None
 
     except Exception as e:
@@ -163,7 +161,7 @@ def main():
     init_db()
     if 'draft_data' not in st.session_state: st.session_state['draft_data'] = None
 
-    st.title("🥗 BodyLog AI")
+    st.title("🥗 BodyLog AI (Free)")
 
     # --- サイドバー ---
     with st.sidebar:
@@ -221,7 +219,7 @@ def main():
         p_color = "green" if rem_p <= 0 else "#d9534f"
         st.markdown(f"""
         <div class="metric-container">
-            <div class="metric-label">残りタンパク質 (目標: {target_p}g)</div>
+            <div class="metric-label">Remaining Protein (Goal: {target_p}g)</div>
             <div class="metric-value" style="color: {p_color};">{max(0, int(rem_p))} g</div>
         </div>
         """, unsafe_allow_html=True)
@@ -238,7 +236,7 @@ def main():
             if in_mode == "文字":
                 txt_in = st.text_input("食事内容", placeholder="例: 牛丼と卵")
                 if st.button("AI解析", type="primary") and txt_in:
-                    with st.spinner("AIが計算中..."):
+                    with st.spinner("Geminiが計算中..."):
                         res = analyze_food(txt_in)
                         if res:
                             st.session_state['draft_data'] = res
@@ -246,7 +244,7 @@ def main():
             else:
                 img_in = st.file_uploader("写真をアップロード", type=["jpg", "png", "jpeg"])
                 if img_in and st.button("画像解析", type="primary"):
-                    with st.spinner("画像を解析中..."):
+                    with st.spinner("Geminiが画像解析中..."):
                         image = Image.open(img_in)
                         res = analyze_food(image)
                         if res:
@@ -257,7 +255,7 @@ def main():
             with st.form("edit_form"):
                 edited_items = []
                 for i, item in enumerate(st.session_state['draft_data']):
-                    st.markdown(f"**Item {i+1}**")
+                    st.markdown(f"**品目 {i+1}**")
                     cols = st.columns([3, 1, 1, 1, 1])
                     n = cols[0].text_input("名前", item['food_name'], key=f"n{i}")
                     k = cols[1].number_input("kcal", 0, 9999, int(item['calories']), key=f"k{i}")
@@ -354,4 +352,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
