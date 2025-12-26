@@ -10,16 +10,12 @@ from PIL import Image
 import time
 
 # ==========================================
-# 🔑 APIキー設定 (Streamlit Cloudの金庫から読み込む)
+# 👇 APIキー
 # ==========================================
-try:
-    # 公開環境（Streamlit Cloud）用
-    API_KEY = st.secrets["GEMINI_API_KEY"]
-except:
-    # 自分のPCでのテスト用（もしローカルで動かしたい場合はここにキーを入れる）
-    API_KEY = "AIzaSyDFtXBreE4btuCc-sugDCiDKXNbv_biSu8"
+API_KEY = "AIzaSyDFtXBreE4btuCc-sugDCiDKXNbv_biSu8"
+# ==========================================
 
-MODEL_NAME = "models/gemini-1.5-flash"
+MODEL_NAME = "models/gemini-2.5-flash"
 genai.configure(api_key=API_KEY)
 
 # ==========================================
@@ -42,7 +38,7 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # ==========================================
-# 💾 データベース管理
+# 💾 データベース
 # ==========================================
 DB_NAME = "diet_app.db"
 
@@ -141,7 +137,7 @@ def main():
         st.divider()
         p_target_ratio = st.slider("タンパク質目標 (体重 x ?)", 1.0, 2.5, 1.6)
         
-        # CSVエクスポート
+        # CSV
         st.divider()
         conn = sqlite3.connect(DB_NAME)
         df_export = pd.read_sql_query("SELECT * FROM meals", conn)
@@ -149,7 +145,7 @@ def main():
         csv = df_export.to_csv(index=False).encode('utf-8')
         st.download_button("💾 CSV保存", csv, "diet_log.csv", "text/csv")
 
-    # 目標計算 (Mifflin-St Jeor式)
+    # 目標計算
     if gender == '男性':
         bmr = (10 * current_weight) + (6.25 * height) - (5 * age) + 5
     else:
@@ -161,6 +157,7 @@ def main():
     today_str = datetime.now().strftime('%Y-%m-%d')
     df_m, df_e = get_daily_data(today_str)
     
+    # 今日の合計値
     cur_cal = df_m['kcal'].sum() if not df_m.empty else 0
     cur_p = df_m['p'].sum() if not df_m.empty else 0
     cur_f = df_m['f'].sum() if not df_m.empty else 0
@@ -168,6 +165,7 @@ def main():
 
     st.caption(f"目標: {target_kcal}kcal (P目標: {target_p}g)")
 
+    # メーター
     c1, c2 = st.columns(2)
     with c1:
         rem_cal = target_kcal - cur_cal
@@ -185,19 +183,21 @@ def main():
     # Tab 1: 記録
     with tab1:
         if st.session_state['draft_data'] is None:
+            st.info("💡 AI解析後に数値を修正できます")
             in_type = st.radio("入力", ["文字", "写真"], horizontal=True)
+            
             if in_type == "文字":
                 txt = st.text_input("食事内容", placeholder="例: 鮭定食")
                 if st.button("解析する", type="primary") and txt:
-                    with st.spinner("AI解析中..."):
+                    with st.spinner("計算中..."):
                         res = analyze_food(txt)
                         if res:
                             st.session_state['draft_data'] = res
                             st.rerun()
             else:
-                img = st.file_uploader("画像", type=["jpg","png","jpeg"])
+                img = st.file_uploader("画像")
                 if img and st.button("解析する", type="primary"):
-                    with st.spinner("画像解析中..."):
+                    with st.spinner("計算中..."):
                         res = analyze_food(Image.open(img))
                         if res:
                             st.session_state['draft_data'] = res
@@ -241,38 +241,49 @@ def main():
                 st.success("記録しました")
                 st.rerun()
         else:
-            st.info("履歴タブの⭐️ボタンで登録できます")
+            st.info("履歴タブから登録できます")
 
-    # Tab 3: 分析
+    # Tab 3: 分析 (円グラフ追加！)
     with tab3:
+        # 1. 今日のPFCバランス (円グラフ)
         st.subheader("今日のPFCバランス")
         if cur_cal > 0:
             fig_pie, ax_pie = plt.subplots(figsize=(4, 4))
-            ax_pie.pie([cur_p, cur_f, cur_c], labels=['P', 'F', 'C'], colors=['#ff9999', '#66b3ff', '#99ff99'], autopct='%1.1f%%', startangle=90)
+            labels = ['Protein (P)', 'Fat (F)', 'Carbs (C)']
+            sizes = [cur_p, cur_f, cur_c]
+            colors = ['#ff9999', '#66b3ff', '#99ff99']
+            ax_pie.pie(sizes, labels=labels, colors=colors, autopct='%1.1f%%', startangle=90)
+            ax_pie.axis('equal')
             st.pyplot(fig_pie)
+            st.caption(f"合計: P {int(cur_p)}g / F {int(cur_f)}g / C {int(cur_c)}g")
         else:
-            st.info("今日のデータがまだありません")
+            st.info("データがありません")
 
         st.divider()
+
+        # 2. 週間推移
+        st.subheader("週間推移")
         df_w = get_weekly_summary()
-        st.subheader("週間摂取カロリー")
         st.bar_chart(df_w.set_index("date")[["intake"]])
         
-        st.subheader("週間タンパク質推移")
         fig, ax = plt.subplots(figsize=(8,3))
         ax.plot(df_w['date'], df_w['protein'], marker='o', label='P摂取量')
         ax.axhline(target_p, color='red', linestyle='--', label='目標')
         ax.legend()
         st.pyplot(fig)
 
-    # Tab 4: 履歴
+    # Tab 4: 履歴 (PFC全表示！)
     with tab4:
+        st.caption("⭐️でマイメニュー登録、🗑️で削除")
         if not df_m.empty:
             for i, r in df_m.iterrows():
+                # デザイン調整
                 with st.container():
                     c1, c2 = st.columns([3, 1])
                     c1.write(f"**{r['name']}**")
+                    # 👇 ここでPFCすべてを表示するように変更しました！
                     c1.caption(f"🔥{int(r['kcal'])}kcal | P:{int(r['p'])}g | F:{int(r['f'])}g | C:{int(r['c'])}g")
+                    
                     if c2.button("⭐️", key=f"fav_{r['id']}"):
                         add_favorite(r['name'], r['kcal'], r['p'], r['f'], r['c'])
                         st.success("登録！")
