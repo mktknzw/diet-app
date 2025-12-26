@@ -19,21 +19,70 @@ except:
     API_KEY = ""
 
 # ==========================================
-# 🧠 AI解析ロジック (REST API直接通信版)
+# 🔍 自動で使えるモデルを探す関数 (REST API)
+# ==========================================
+def get_available_model():
+    if not API_KEY:
+        return None
+    
+    # モデルリストを取得するURL
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
+    
+    try:
+        response = requests.get(url)
+        if response.status_code != 200:
+            st.error(f"APIキーの確認に失敗しました (Error {response.status_code})。キーが無効か、Google側で制限されています。")
+            return None
+            
+        data = response.json()
+        
+        # 'generateContent' に対応しているモデルを探す
+        # 優先順位: 1.5-flash -> 1.5-pro -> 1.0-pro -> その他
+        preferred_order = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro", "gemini-1.0-pro"]
+        
+        available_models = []
+        if "models" in data:
+            for m in data["models"]:
+                # モデル名 (models/xxxx) と 対応メソッドを確認
+                if "generateContent" in m.get("supportedGenerationMethods", []):
+                    available_models.append(m["name"].replace("models/", ""))
+
+        # 優先順位に従ってモデルを決定
+        for p in preferred_order:
+            for a in available_models:
+                if p in a:
+                    return f"models/{a}" # 見つかった！
+        
+        # 優先モデルがない場合、リストの最初を使う
+        if available_models:
+            return f"models/{available_models[0]}"
+            
+        st.error("使えるモデルが1つも見つかりませんでした。")
+        return None
+
+    except Exception as e:
+        st.error(f"モデル探索エラー: {e}")
+        return None
+
+# ==========================================
+# 🧠 AI解析ロジック (REST API直接通信)
 # ==========================================
 def analyze_food(text_or_image):
     if not API_KEY:
         st.error("SecretsにAPIキーが設定されていません。")
         return None
 
-    # 🟢 Googleのサーバーの住所 (直接指定)
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={API_KEY}"
-    
-    headers = {
-        "Content-Type": "application/json"
-    }
+    # 🟢 毎回、使えるモデルを確認してから投げる
+    model_name = get_available_model()
+    if not model_name:
+        return None
 
-    # プロンプト (AIへの命令)
+    # URLの構築
+    url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={API_KEY}"
+    
+    headers = {"Content-Type": "application/json"}
+
+    # プロンプト
     system_instruction = """
     Analyze food items. Estimate Calories, Protein(P), Fat(F), Carbs(C).
     If specific values are given (e.g. "Protein 20g"), use them.
@@ -41,65 +90,42 @@ def analyze_food(text_or_image):
     [{"food_name": "Item Name", "calories": 0, "protein": 0, "fat": 0, "carbs": 0}]
     """
 
-    # 送信するデータの作成
+    # ペイロード作成
     payload = {}
-
     if isinstance(text_or_image, str):
-        # --- テキストの場合 ---
         payload = {
-            "contents": [{
-                "parts": [{"text": f"Input: {text_or_image}. {system_instruction}"}]
-            }]
+            "contents": [{"parts": [{"text": f"Input: {text_or_image}. {system_instruction}"}]}]
         }
     else:
-        # --- 画像の場合 ---
-        # 画像を文字データ(Base64)に変換して直接送る
         buffered = io.BytesIO()
         text_or_image.save(buffered, format="JPEG")
         img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
-
         payload = {
             "contents": [{
                 "parts": [
                     {"text": system_instruction},
-                    {
-                        "inline_data": {
-                            "mime_type": "image/jpeg",
-                            "data": img_str
-                        }
-                    }
+                    {"inline_data": {"mime_type": "image/jpeg", "data": img_str}}
                 ]
             }]
         }
 
     try:
-        # 🟢 ここでGoogleに直接データを投げる！
         response = requests.post(url, headers=headers, data=json.dumps(payload))
         
-        # もしエラーが返ってきたら、その「生の理由」を表示する
         if response.status_code != 200:
-            st.error(f"Google Server Error ({response.status_code}): {response.text}")
+            st.error(f"Google Error ({model_name}): {response.text}")
             return None
 
-        # 成功したらデータを取り出す
         result_json = response.json()
         try:
-            # AIの回答テキストを取り出す
             text_response = result_json["candidates"][0]["content"]["parts"][0]["text"]
-            
-            # JSON部分を探して取り出す
             match = re.search(r'\[.*\]', text_response, re.DOTALL)
-            if match:
-                return json.loads(match.group(0))
-            
-            match_single = re.search(r'\{.*\}', text_response, re.DOTALL)
-            if match_single:
-                return [json.loads(match_single.group(0))]
-            
+            if match: return json.loads(match.group(0))
+            match_s = re.search(r'\{.*\}', text_response, re.DOTALL)
+            if match_s: return [json.loads(match_s.group(0))]
             return None
-
-        except (KeyError, IndexError) as e:
-            st.error("AIからの応答が空でした。画像が読み取れなかった可能性があります。")
+        except:
+            st.error("AIからの応答を解析できませんでした。")
             return None
 
     except Exception as e:
@@ -161,7 +187,7 @@ def main():
     init_db()
     if 'draft_data' not in st.session_state: st.session_state['draft_data'] = None
 
-    st.title("🥗 BodyLog AI (Free)")
+    st.title("🥗 BodyLog AI (Auto)")
 
     # --- サイドバー ---
     with st.sidebar:
@@ -208,7 +234,7 @@ def main():
         rem_cal = target_kcal - sum_cal
         st.markdown(f"""
         <div class="metric-container">
-            <div class="metric-label">残りカロリー (目標: {target_kcal})</div>
+            <div class="metric-label">Remaining Cal (目標: {target_kcal})</div>
             <div class="metric-value">{int(rem_cal)}</div>
         </div>
         """, unsafe_allow_html=True)
@@ -219,7 +245,7 @@ def main():
         p_color = "green" if rem_p <= 0 else "#d9534f"
         st.markdown(f"""
         <div class="metric-container">
-            <div class="metric-label">Remaining Protein (Goal: {target_p}g)</div>
+            <div class="metric-label">Remaining Protein (目標: {target_p}g)</div>
             <div class="metric-value" style="color: {p_color};">{max(0, int(rem_p))} g</div>
         </div>
         """, unsafe_allow_html=True)
@@ -236,7 +262,7 @@ def main():
             if in_mode == "文字":
                 txt_in = st.text_input("食事内容", placeholder="例: 牛丼と卵")
                 if st.button("AI解析", type="primary") and txt_in:
-                    with st.spinner("Geminiが計算中..."):
+                    with st.spinner("AIが考え中..."):
                         res = analyze_food(txt_in)
                         if res:
                             st.session_state['draft_data'] = res
@@ -244,7 +270,7 @@ def main():
             else:
                 img_in = st.file_uploader("写真をアップロード", type=["jpg", "png", "jpeg"])
                 if img_in and st.button("画像解析", type="primary"):
-                    with st.spinner("Geminiが画像解析中..."):
+                    with st.spinner("AIが考え中..."):
                         image = Image.open(img_in)
                         res = analyze_food(image)
                         if res:
