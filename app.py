@@ -21,25 +21,6 @@ except:
     API_KEY = "AIzaSyDFtXBreE4btuCc-sugDCiDKXNbv_biSu8"
 
 genai.configure(api_key=API_KEY)
-import streamlit as st
-import google.generativeai as genai
-import json
-import re
-import matplotlib.pyplot as plt
-import sqlite3
-from datetime import datetime, timedelta
-import pandas as pd
-from PIL import Image
-import time
-
-# ==========================================
-# 👇 APIキー
-# ==========================================
-API_KEY = "ここにAPIキーを貼り付ける"
-# ==========================================
-
-MODEL_NAME = "models/gemini-2.5-flash"
-genai.configure(api_key=API_KEY)
 
 # ==========================================
 # 🎨 デザイン (CSS)
@@ -319,3 +300,4 @@ def main():
 if __name__ == "__main__":
 
     main()
+
