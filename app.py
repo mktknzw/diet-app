@@ -7,6 +7,7 @@ import sqlite3
 from datetime import datetime, timedelta
 import pandas as pd
 from PIL import Image
+import time
 
 # ==========================================
 # 🔑 APIキー設定
@@ -14,7 +15,7 @@ from PIL import Image
 try:
     API_KEY = st.secrets["GEMINI_API_KEY"]
 except:
-    API_KEY = ""
+    API_KEY = "" # ローカルテスト用
 
 if API_KEY:
     genai.configure(api_key=API_KEY)
@@ -68,44 +69,58 @@ def get_db(query, args=()):
     return df
 
 # ==========================================
-# 🧠 AI解析ロジック
+# 🧠 AI解析ロジック（総当たり対応版）
 # ==========================================
 def analyze_food(text_or_image):
     if not API_KEY:
-        st.error("Set GEMINI_API_KEY in Secrets.")
+        st.error("SecretsにAPIキーを設定してください")
         return None
     
-    try:
-        # Prompt
-        prompt = """
-        Analyze food items. Estimate Calories, Protein(P), Fat(F), Carbs(C).
-        If specific values are given (e.g. "Protein 20g"), use them.
-        Output ONLY a JSON list:
-        [{"food_name": "Item Name", "calories": 0, "protein": 0, "fat": 0, "carbs": 0}]
-        """
+    # 試行するモデルのリスト（優先順位順）
+    # 最新のFlash -> 最新のPro -> 旧Pro の順に試す
+    candidate_models = [
+        "gemini-1.5-flash",
+        "gemini-1.5-pro",
+        "gemini-pro",
+        "gemini-1.0-pro"
+    ]
 
-        if isinstance(text_or_image, str):
-            # Text: Use gemini-pro
-            model = genai.GenerativeModel("gemini-pro")
-            res = model.generate_content(f"Input: {text_or_image}. {prompt}")
-        else:
-            # Image: Use gemini-1.5-flash
-            model = genai.GenerativeModel("gemini-1.5-flash")
-            res = model.generate_content([prompt, text_or_image])
+    prompt = """
+    Analyze food items. Estimate Calories, Protein(P), Fat(F), Carbs(C).
+    If specific values are given (e.g. "Protein 20g"), use them.
+    Output ONLY a JSON list:
+    [{"food_name": "Item Name", "calories": 0, "protein": 0, "fat": 0, "carbs": 0}]
+    """
+
+    for model_name in candidate_models:
+        try:
+            model = genai.GenerativeModel(model_name)
             
-        match = re.search(r'\[.*\]', res.text, re.DOTALL)
-        if match:
-            return json.loads(match.group(0))
-        
-        match_single = re.search(r'\{.*\}', res.text, re.DOTALL)
-        if match_single:
-            return [json.loads(match_single.group(0))]
-        
-        return None
+            # 画像かテキストかで処理を分ける
+            if isinstance(text_or_image, str):
+                res = model.generate_content(f"Input: {text_or_image}. {prompt}")
+            else:
+                # gemini-pro (旧) は画像非対応なのでスキップして次のモデルへ
+                if "gemini-pro" == model_name or "gemini-1.0-pro" == model_name:
+                    continue 
+                res = model.generate_content([prompt, text_or_image])
+            
+            # 成功したらJSONを抽出して返す
+            match = re.search(r'\[.*\]', res.text, re.DOTALL)
+            if match:
+                return json.loads(match.group(0))
+            
+            match_single = re.search(r'\{.*\}', res.text, re.DOTALL)
+            if match_single:
+                return [json.loads(match_single.group(0))]
+            
+        except Exception:
+            # 失敗したら次のモデルを試すので何もしない
+            continue
 
-    except Exception as e:
-        st.error(f"AI Error: {e}")
-        return None
+    # 全モデルがダメだった場合
+    st.error("全てのAIモデルで接続に失敗しました。時間をおいて再試行してください。")
+    return None
 
 # ==========================================
 # 📱 アプリメイン処理
