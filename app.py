@@ -11,25 +11,37 @@ import io
 import base64
 
 # ==========================================
-# 🔑 APIキー設定
+# 🔑 APIキー設定 (余計な空白を除去)
 # ==========================================
 try:
-    API_KEY = st.secrets["GEMINI_API_KEY"]
+    # キーの前後に空白が入っている事故を防ぐため strip() を追加
+    API_KEY = st.secrets["GEMINI_API_KEY"].strip()
 except:
     API_KEY = ""
 
 # ==========================================
-# 🧠 AI解析ロジック (完全固定・直通版)
+# 🧠 AI解析ロジック (総当たりREST API版)
 # ==========================================
 def analyze_food(text_or_image):
     if not API_KEY:
         st.error("SecretsにAPIキーが設定されていません。")
         return None
 
-    # 🟢 探索をやめ、無料枠の標準モデル「1.5-flash」を決め打ちで指定
-    # これがGoogleの無料枠における「本籍地」です
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={API_KEY}"
-    
+    # 🟢 【最終手段】試行するモデルとバージョンのリスト
+    # 404が出たら即座に次の設定で再トライします
+    try_targets = [
+        # 本命: 最新のFlash (バージョン v1beta)
+        {"model": "gemini-1.5-flash", "version": "v1beta"},
+        # 対抗: バージョン固定のFlash
+        {"model": "gemini-1.5-flash-001", "version": "v1beta"},
+        # 穴: 安定版API (v1) を使うFlash
+        {"model": "gemini-1.5-flash", "version": "v1"},
+        # 保険: 旧世代のPro (1.0)
+        {"model": "gemini-1.0-pro", "version": "v1beta"},
+        # 大穴: 最新のPro
+        {"model": "gemini-1.5-pro", "version": "v1beta"},
+    ]
+
     headers = {"Content-Type": "application/json"}
 
     # プロンプト
@@ -40,14 +52,17 @@ def analyze_food(text_or_image):
     [{"food_name": "Item Name", "calories": 0, "protein": 0, "fat": 0, "carbs": 0}]
     """
 
-    # ペイロード作成
+    # 送信データの準備
     payload = {}
-    if isinstance(text_or_image, str):
+    is_image = not isinstance(text_or_image, str)
+
+    if not is_image:
+        # テキスト
         payload = {
             "contents": [{"parts": [{"text": f"Input: {text_or_image}. {system_instruction}"}]}]
         }
     else:
-        # 画像処理
+        # 画像
         buffered = io.BytesIO()
         text_or_image.save(buffered, format="JPEG")
         img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
@@ -60,48 +75,64 @@ def analyze_food(text_or_image):
             }]
         }
 
-    try:
-        # 送信
-        response = requests.post(url, headers=headers, data=json.dumps(payload))
+    # 🔄 総当たり開始
+    last_error_msg = ""
+    
+    for target in try_targets:
+        model = target["model"]
+        version = target["version"]
         
-        # 🟢 エラーの詳細診断
-        if response.status_code != 200:
-            error_data = response.json()
-            error_msg = error_data.get('error', {}).get('message', response.text)
-            
-            # よくあるエラーの翻訳
-            if response.status_code == 400:
-                st.error(f"❌ APIキーが無効です (400 Bad Request)。Google AI Studioでキーを作り直してください。\n詳細: {error_msg}")
-            elif response.status_code == 403:
-                st.error(f"🚫 アクセス権限がありません (403 Forbidden)。国/地域制限の可能性があります。\n詳細: {error_msg}")
-            elif response.status_code == 404:
-                st.error(f"🔍 モデルが見つかりません (404)。Google側で一時的な障害の可能性があります。\n詳細: {error_msg}")
-            elif response.status_code == 429:
-                st.warning("⚠️ 使いすぎです (429 Too Many Requests)。1分ほど待ってから試してください。")
-            else:
-                st.error(f"サーバーエラー ({response.status_code}): {error_msg}")
-            return None
+        # 旧モデル(1.0-pro)は画像に対応していないので、画像入力のときはスキップ
+        if is_image and "1.0-pro" in model:
+            continue
 
-        # 成功時の処理
-        result_json = response.json()
+        # URL構築
+        url = f"https://generativelanguage.googleapis.com/{version}/models/{model}:generateContent?key={API_KEY}"
+        
         try:
-            if "candidates" not in result_json:
-                st.error("AIからの応答が空でした。")
+            # 送信！
+            response = requests.post(url, headers=headers, data=json.dumps(payload))
+            
+            # 404 (見つからない) なら次のモデルへ
+            if response.status_code == 404:
+                last_error_msg = f"{model} ({version}): Not Found"
+                continue
+            
+            # 400 (キー無効) なら即終了
+            if response.status_code == 400:
+                st.error("❌ APIキーが無効です (400)。Google AI Studioでキーを確認してください。")
                 return None
-                
-            text_response = result_json["candidates"][0]["content"]["parts"][0]["text"]
-            match = re.search(r'\[.*\]', text_response, re.DOTALL)
-            if match: return json.loads(match.group(0))
-            match_s = re.search(r'\{.*\}', text_response, re.DOTALL)
-            if match_s: return [json.loads(match_s.group(0))]
-            return None
-        except Exception as e:
-            st.error(f"データ解析エラー: {e}")
-            return None
 
-    except Exception as e:
-        st.error(f"通信エラー: {e}")
-        return None
+            # 429 (使いすぎ) なら待機指示
+            if response.status_code == 429:
+                st.warning("⚠️ 無料枠の速度制限です。1分ほど待ってから再試行してください。")
+                return None
+            
+            # 200 (成功) ならループを抜けて処理へ！
+            if response.status_code == 200:
+                # 成功！
+                result_json = response.json()
+                try:
+                    text_response = result_json["candidates"][0]["content"]["parts"][0]["text"]
+                    match = re.search(r'\[.*\]', text_response, re.DOTALL)
+                    if match: return json.loads(match.group(0))
+                    match_s = re.search(r'\{.*\}', text_response, re.DOTALL)
+                    if match_s: return [json.loads(match_s.group(0))]
+                except:
+                    # JSON解析失敗
+                    continue
+                
+                # ここまで来ればデータを返せる
+                return None # ここに到達するのは稀
+
+        except Exception as e:
+            last_error_msg = str(e)
+            continue
+
+    # ループが終わってもリターンしていない＝全滅
+    st.error(f"全てのモデルで失敗しました。最後の詳細: {last_error_msg}")
+    st.info("ヒント: Google AI Studioで、このAPIキーが「Generative Language API」有効なプロジェクトに紐付いているか確認してください。")
+    return None
 
 # ==========================================
 # 🎨 UIデザイン
@@ -158,7 +189,7 @@ def main():
     init_db()
     if 'draft_data' not in st.session_state: st.session_state['draft_data'] = None
 
-    st.title("🥗 BodyLog AI (Direct)")
+    st.title("🥗 BodyLog AI (Hybrid)")
 
     # --- サイドバー ---
     with st.sidebar:
@@ -233,7 +264,7 @@ def main():
             if in_mode == "文字":
                 txt_in = st.text_input("食事内容", placeholder="例: 牛丼と卵")
                 if st.button("AI解析", type="primary") and txt_in:
-                    with st.spinner("AIが考え中..."):
+                    with st.spinner("AIが計算中..."):
                         res = analyze_food(txt_in)
                         if res:
                             st.session_state['draft_data'] = res
@@ -241,7 +272,7 @@ def main():
             else:
                 img_in = st.file_uploader("写真をアップロード", type=["jpg", "png", "jpeg"])
                 if img_in and st.button("画像解析", type="primary"):
-                    with st.spinner("AIが考え中..."):
+                    with st.spinner("AIが解析中..."):
                         image = Image.open(img_in)
                         res = analyze_food(image)
                         if res:
