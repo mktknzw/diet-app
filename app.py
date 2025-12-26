@@ -1,5 +1,5 @@
 import streamlit as st
-from google import genai # 🟢 新しいライブラリ
+import requests
 import json
 import re
 import matplotlib.pyplot as plt
@@ -7,23 +7,106 @@ import sqlite3
 from datetime import datetime, timedelta
 import pandas as pd
 from PIL import Image
+import io
+import base64
 
 # ==========================================
-# 🔑 APIキー設定 (新しいクライアント方式)
+# 🔑 APIキー設定
 # ==========================================
 try:
     API_KEY = st.secrets["GEMINI_API_KEY"]
 except:
     API_KEY = ""
 
-# 🟢 新しいライブラリのクライアント初期化
-if API_KEY:
-    client = genai.Client(api_key=API_KEY)
-else:
-    client = None
+# ==========================================
+# 🧠 AI解析ロジック (REST API直接通信版)
+# ==========================================
+def analyze_food(text_or_image):
+    if not API_KEY:
+        st.error("SecretsにAPIキーが設定されていません。")
+        return None
 
-# 使用するモデル (最新SDKの標準)
-MODEL_NAME = "gemini-1.5-flash"
+    # 🟢 接続先URL (ライブラリを使わず直接叩く)
+    # gemini-1.5-flash を指定
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={API_KEY}"
+    
+    headers = {
+        "Content-Type": "application/json"
+    }
+
+    # プロンプト
+    system_instruction = """
+    Analyze food items. Estimate Calories, Protein(P), Fat(F), Carbs(C).
+    If specific values are given (e.g. "Protein 20g"), use them.
+    Output ONLY a JSON list:
+    [{"food_name": "Item Name", "calories": 0, "protein": 0, "fat": 0, "carbs": 0}]
+    """
+
+    # データ（Payload）の作成
+    payload = {}
+
+    if isinstance(text_or_image, str):
+        # --- テキストの場合 ---
+        payload = {
+            "contents": [{
+                "parts": [{"text": f"Input: {text_or_image}. {system_instruction}"}]
+            }]
+        }
+    else:
+        # --- 画像の場合 ---
+        # 画像をBase64という文字データに変換
+        buffered = io.BytesIO()
+        text_or_image.save(buffered, format="JPEG")
+        img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+
+        payload = {
+            "contents": [{
+                "parts": [
+                    {"text": system_instruction},
+                    {
+                        "inline_data": {
+                            "mime_type": "image/jpeg",
+                            "data": img_str
+                        }
+                    }
+                ]
+            }]
+        }
+
+    try:
+        # 🟢 直接POSTリクエスト送信
+        response = requests.post(url, headers=headers, data=json.dumps(payload))
+        
+        # 結果の確認
+        if response.status_code != 200:
+            # エラーならその内容を表示 (404などの原因がこれで生々しく分かります)
+            st.error(f"Server Error ({response.status_code}): {response.text}")
+            return None
+
+        # JSONの解読
+        result_json = response.json()
+        try:
+            # AIの回答テキストを取り出す
+            text_response = result_json["candidates"][0]["content"]["parts"][0]["text"]
+            
+            # JSON部分を抽出
+            match = re.search(r'\[.*\]', text_response, re.DOTALL)
+            if match:
+                return json.loads(match.group(0))
+            
+            match_single = re.search(r'\{.*\}', text_response, re.DOTALL)
+            if match_single:
+                return [json.loads(match_single.group(0))]
+            
+            return None
+
+        except (KeyError, IndexError) as e:
+            st.error(f"データ解析エラー: AIからの応答形式が予期しないものでした。詳細: {e}")
+            return None
+
+    except Exception as e:
+        st.error(f"通信エラー: {e}")
+        return None
 
 # ==========================================
 # 🎨 UIデザイン
@@ -74,51 +157,6 @@ def get_db(query, args=()):
     return df
 
 # ==========================================
-# 🧠 AI解析ロジック (新ライブラリ対応版)
-# ==========================================
-def analyze_food(text_or_image):
-    if not client:
-        st.error("SecretsにAPIキーを設定してください。")
-        return None
-    
-    try:
-        prompt = """
-        Analyze food items. Estimate Calories, Protein(P), Fat(F), Carbs(C).
-        If specific values are given (e.g. "Protein 20g"), use them.
-        Output ONLY a JSON list:
-        [{"food_name": "Item Name", "calories": 0, "protein": 0, "fat": 0, "carbs": 0}]
-        """
-
-        if isinstance(text_or_image, str):
-            # テキスト入力 (新SDKの書き方)
-            response = client.models.generate_content(
-                model=MODEL_NAME,
-                contents=f"Input: {text_or_image}. {prompt}"
-            )
-        else:
-            # 画像入力
-            response = client.models.generate_content(
-                model=MODEL_NAME,
-                contents=[text_or_image, prompt]
-            )
-            
-        # レスポンスからテキスト抽出
-        if response.text:
-            match = re.search(r'\[.*\]', response.text, re.DOTALL)
-            if match:
-                return json.loads(match.group(0))
-            
-            match_single = re.search(r'\{.*\}', response.text, re.DOTALL)
-            if match_single:
-                return [json.loads(match_single.group(0))]
-        
-        return None
-
-    except Exception as e:
-        st.error(f"AI Error: {e}")
-        return None
-
-# ==========================================
 # 📱 アプリメイン処理
 # ==========================================
 def main():
@@ -130,24 +168,24 @@ def main():
     # --- サイドバー ---
     with st.sidebar:
         st.header("⚙️ Config")
-        current_weight = st.number_input("Weight (kg)", 30.0, 150.0, 65.0)
+        current_weight = st.number_input("体重 (kg)", 30.0, 150.0, 65.0)
         
-        with st.expander("Details", expanded=False):
-            gender = st.radio("Gender", ["Male", "Female"], horizontal=True)
-            age = st.number_input("Age", 10, 100, 30)
-            height = st.number_input("Height (cm)", 100.0, 250.0, 170.0)
-            act_idx = st.selectbox("Activity", [0,1,2,3], format_func=lambda x: ["x1.2 (Low)", "x1.375 (Mid)", "x1.55 (High)", "x1.725 (Very High)"][x])
+        with st.expander("詳細設定", expanded=False):
+            gender = st.radio("性別", ["Male", "Female"], horizontal=True)
+            age = st.number_input("年齢", 10, 100, 30)
+            height = st.number_input("身長 (cm)", 100.0, 250.0, 170.0)
+            act_idx = st.selectbox("活動レベル", [0,1,2,3], format_func=lambda x: ["x1.2 (低)", "x1.375 (中)", "x1.55 (高)", "x1.725 (激)"][x])
             act_val = [1.2, 1.375, 1.55, 1.725][act_idx]
-            goal_idx = st.selectbox("Goal", [0,1,2], format_func=lambda x: ["Maintain", "Lose(-500)", "Gain(+300)"][x])
+            goal_idx = st.selectbox("目的", [0,1,2], format_func=lambda x: ["維持", "減量(-500)", "増量(+300)"][x])
             goal_val = [0, -500, 300][goal_idx]
         
-        p_ratio = st.slider("Protein Target (x Weight)", 1.0, 3.0, 1.6)
+        p_ratio = st.slider("タンパク質目標 (体重 x ?)", 1.0, 3.0, 1.6)
 
         st.divider()
         df_all = get_db("SELECT * FROM meals")
         if not df_all.empty:
             csv = df_all.to_csv(index=False).encode('utf-8')
-            st.download_button("💾 CSV Download", csv, "diet_log.csv", "text/csv")
+            st.download_button("💾 CSVダウンロード", csv, "diet_log.csv", "text/csv")
 
     # --- 目標計算 ---
     if gender == 'Male':
@@ -172,7 +210,7 @@ def main():
         rem_cal = target_kcal - sum_cal
         st.markdown(f"""
         <div class="metric-container">
-            <div class="metric-label">Remaining Cal (Goal: {target_kcal})</div>
+            <div class="metric-label">残りカロリー (目標: {target_kcal})</div>
             <div class="metric-value">{int(rem_cal)}</div>
         </div>
         """, unsafe_allow_html=True)
@@ -183,45 +221,45 @@ def main():
         p_color = "green" if rem_p <= 0 else "#d9534f"
         st.markdown(f"""
         <div class="metric-container">
-            <div class="metric-label">Remaining Protein (Goal: {target_p}g)</div>
+            <div class="metric-label">残りタンパク質 (目標: {target_p}g)</div>
             <div class="metric-value" style="color: {p_color};">{max(0, int(rem_p))} g</div>
         </div>
         """, unsafe_allow_html=True)
         st.progress(min(sum_p / target_p, 1.0) if target_p > 0 else 0)
 
     # --- タブ ---
-    tab1, tab2, tab3, tab4 = st.tabs(["📝 Record", "⭐️ Menu", "📊 Analysis", "🗑️ History"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📝 記録", "⭐️ 定番", "📊 分析", "🗑️ 履歴"])
 
     # Tab 1: AI記録
     with tab1:
         if st.session_state['draft_data'] is None:
-            in_mode = st.radio("Mode", ["Text", "Photo"], horizontal=True)
+            in_mode = st.radio("入力モード", ["文字", "写真"], horizontal=True)
             
-            if in_mode == "Text":
-                txt_in = st.text_input("Food", placeholder="ex: Beef bowl")
-                if st.button("Analyze", type="primary") and txt_in:
-                    with st.spinner("AI Thinking..."):
+            if in_mode == "文字":
+                txt_in = st.text_input("食事内容", placeholder="例: 牛丼と卵")
+                if st.button("AI解析", type="primary") and txt_in:
+                    with st.spinner("AIが計算中..."):
                         res = analyze_food(txt_in)
                         if res:
                             st.session_state['draft_data'] = res
                             st.rerun()
             else:
-                img_in = st.file_uploader("Photo", type=["jpg", "png", "jpeg"])
-                if img_in and st.button("Analyze", type="primary"):
-                    with st.spinner("AI Processing..."):
+                img_in = st.file_uploader("写真をアップロード", type=["jpg", "png", "jpeg"])
+                if img_in and st.button("画像解析", type="primary"):
+                    with st.spinner("画像を解析中..."):
                         image = Image.open(img_in)
                         res = analyze_food(image)
                         if res:
                             st.session_state['draft_data'] = res
                             st.rerun()
         else:
-            st.info("Check & Save")
+            st.info("内容を確認して保存してください")
             with st.form("edit_form"):
                 edited_items = []
                 for i, item in enumerate(st.session_state['draft_data']):
                     st.markdown(f"**Item {i+1}**")
                     cols = st.columns([3, 1, 1, 1, 1])
-                    n = cols[0].text_input("Name", item['food_name'], key=f"n{i}")
+                    n = cols[0].text_input("名前", item['food_name'], key=f"n{i}")
                     k = cols[1].number_input("kcal", 0, 9999, int(item['calories']), key=f"k{i}")
                     p = cols[2].number_input("P", 0, 999, int(item['protein']), key=f"p{i}")
                     f = cols[3].number_input("F", 0, 999, int(item['fat']), key=f"f{i}")
@@ -229,16 +267,16 @@ def main():
                     edited_items.append({"name":n, "kcal":k, "p":p, "f":f, "c":c})
                 
                 b1, b2 = st.columns(2)
-                if b1.form_submit_button("✅ Save", type="primary"):
+                if b1.form_submit_button("✅ 保存", type="primary"):
                     today = datetime.now().strftime('%Y-%m-%d')
                     for item in edited_items:
                         execute_db("INSERT INTO meals (date, name, kcal, p, f, c) VALUES (?, ?, ?, ?, ?, ?)",
                                    (today, item['name'], item['kcal'], item['p'], item['f'], item['c']))
                     st.session_state['draft_data'] = None
-                    st.success("Saved!")
+                    st.success("保存しました")
                     st.rerun()
                 
-                if b2.form_submit_button("❌ Cancel"):
+                if b2.form_submit_button("❌ キャンセル"):
                     st.session_state['draft_data'] = None
                     st.rerun()
 
@@ -246,32 +284,32 @@ def main():
     with tab2:
         favs = get_db("SELECT * FROM favorites")
         if not favs.empty:
-            sel_fav = st.selectbox("My Menu", favs['name'])
+            sel_fav = st.selectbox("マイメニュー", favs['name'])
             target = favs[favs['name'] == sel_fav].iloc[0]
             st.success(f"{target['name']} : {int(target['kcal'])}kcal")
-            if st.button("Add to Today"):
+            if st.button("これ食べた！ (追加)"):
                 today = datetime.now().strftime('%Y-%m-%d')
                 execute_db("INSERT INTO meals (date, name, kcal, p, f, c) VALUES (?, ?, ?, ?, ?, ?)",
                            (today, target['name'], target['kcal'], target['p'], target['f'], target['c']))
-                st.success("Added!")
+                st.success("追加しました")
                 time.sleep(1)
                 st.rerun()
         else:
-            st.info("Save favorites from History tab.")
+            st.info("履歴タブの「⭐️」ボタンで登録できます。")
 
     # Tab 3: 分析
     with tab3:
-        st.subheader("Balance")
+        st.subheader("今日のバランス")
         if sum_cal > 0:
             fig, ax = plt.subplots(figsize=(4, 4))
             ax.pie([sum_p, sum_f, sum_c], labels=['Protein', 'Fat', 'Carbs'], 
                    colors=['#ff9999', '#66b3ff', '#99ff99'], autopct='%1.1f%%', startangle=90)
             st.pyplot(fig)
         else:
-            st.write("No data")
+            st.write("データがありません")
         
         st.divider()
-        st.subheader("Weekly")
+        st.subheader("週間推移")
         dates = [(datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d') for i in range(7)][::-1]
         weekly_data = []
         for d in dates:
@@ -305,14 +343,15 @@ def main():
                     if bc1.button("⭐️", key=f"fav_{r['id']}"):
                         execute_db("INSERT INTO favorites (name, kcal, p, f, c) VALUES (?, ?, ?, ?, ?)",
                                    (r['name'], r['kcal'], r['p'], r['f'], r['c']))
-                        st.success("Saved!")
+                        st.success("登録！")
                     
                     if bc2.button("🗑️", key=f"del_{r['id']}"):
                         execute_db("DELETE FROM meals WHERE id=?", (r['id'],))
                         st.rerun()
                     st.divider()
         else:
-            st.info("No records today")
+            st.info("今日の記録はありません")
 
 if __name__ == "__main__":
     main()
+
