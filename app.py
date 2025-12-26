@@ -9,7 +9,6 @@ import pandas as pd
 from PIL import Image
 import io
 import base64
-import time
 
 # ==========================================
 # 🔑 APIキー設定
@@ -20,70 +19,16 @@ except:
     API_KEY = ""
 
 # ==========================================
-# 🔍 自動で使える「無料」モデルを探す関数
-# ==========================================
-def get_available_model():
-    if not API_KEY:
-        return None
-    
-    # 🟢 【対策】無料枠で確実に動く "Flash" シリーズだけを徹底的に試すリスト
-    # Pro系を入れると「Limit 0」のエラーになるため除外しました
-    candidate_models = [
-        "gemini-1.5-flash",
-        "gemini-1.5-flash-latest",
-        "gemini-1.5-flash-001",
-        "gemini-1.5-flash-002",
-        "gemini-1.0-pro" # どうしてもFlashがだめな時の保険
-    ]
-
-    # モデルリストを取得せず、直接「生存確認」を行う方式に変更
-    # (ListModelsAPI自体が不安定な場合があるため)
-    
-    base_url = "https://generativelanguage.googleapis.com/v1beta/models/"
-    headers = {"Content-Type": "application/json"}
-    dummy_payload = {
-        "contents": [{"parts": [{"text": "Hello"}]}]
-    }
-
-    st.toast("🔍 最適な無料AIモデルを探索中...", icon="🤖")
-
-    for model_name in candidate_models:
-        check_url = f"{base_url}{model_name}:generateContent?key={API_KEY}"
-        try:
-            # テスト送信
-            response = requests.post(check_url, headers=headers, data=json.dumps(dummy_payload))
-            
-            if response.status_code == 200:
-                # 成功したらこのモデルを採用！
-                return f"models/{model_name}"
-            elif response.status_code == 429:
-                # 429は「使いすぎ」または「無料枠なし」。これはスキップ
-                continue
-            
-        except:
-            continue
-
-    st.error("❌ 利用可能な無料モデルが見つかりませんでした。Google AI StudioでAPIキーの設定を確認するか、1分待ってから再試行してください。")
-    return None
-
-# ==========================================
-# 🧠 AI解析ロジック (REST API直接通信)
+# 🧠 AI解析ロジック (完全固定・直通版)
 # ==========================================
 def analyze_food(text_or_image):
     if not API_KEY:
         st.error("SecretsにAPIキーが設定されていません。")
         return None
 
-    # 🟢 毎回、使えるモデルを確認してから投げる (キャッシュしても良いが安全重視)
-    if 'cached_model' not in st.session_state:
-        st.session_state['cached_model'] = get_available_model()
-    
-    model_name = st.session_state['cached_model']
-    if not model_name:
-        return None
-
-    # URLの構築
-    url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={API_KEY}"
+    # 🟢 探索をやめ、無料枠の標準モデル「1.5-flash」を決め打ちで指定
+    # これがGoogleの無料枠における「本籍地」です
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={API_KEY}"
     
     headers = {"Content-Type": "application/json"}
 
@@ -102,6 +47,7 @@ def analyze_food(text_or_image):
             "contents": [{"parts": [{"text": f"Input: {text_or_image}. {system_instruction}"}]}]
         }
     else:
+        # 画像処理
         buffered = io.BytesIO()
         text_or_image.save(buffered, format="JPEG")
         img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
@@ -115,24 +61,32 @@ def analyze_food(text_or_image):
         }
 
     try:
+        # 送信
         response = requests.post(url, headers=headers, data=json.dumps(payload))
         
-        # 🟢 エラーハンドリング強化
-        if response.status_code == 429:
-            st.warning("⚠️ Googleの無料枠制限(速度制限)にかかりました。約60秒待ってから再試行してください。")
-            return None
-        
+        # 🟢 エラーの詳細診断
         if response.status_code != 200:
-            st.error(f"Google Error ({model_name}): {response.text}")
-            # エラーが出たらキャッシュをクリアして次回再探索
-            del st.session_state['cached_model']
+            error_data = response.json()
+            error_msg = error_data.get('error', {}).get('message', response.text)
+            
+            # よくあるエラーの翻訳
+            if response.status_code == 400:
+                st.error(f"❌ APIキーが無効です (400 Bad Request)。Google AI Studioでキーを作り直してください。\n詳細: {error_msg}")
+            elif response.status_code == 403:
+                st.error(f"🚫 アクセス権限がありません (403 Forbidden)。国/地域制限の可能性があります。\n詳細: {error_msg}")
+            elif response.status_code == 404:
+                st.error(f"🔍 モデルが見つかりません (404)。Google側で一時的な障害の可能性があります。\n詳細: {error_msg}")
+            elif response.status_code == 429:
+                st.warning("⚠️ 使いすぎです (429 Too Many Requests)。1分ほど待ってから試してください。")
+            else:
+                st.error(f"サーバーエラー ({response.status_code}): {error_msg}")
             return None
 
+        # 成功時の処理
         result_json = response.json()
         try:
-            # 応答の検証
-            if "candidates" not in result_json or not result_json["candidates"]:
-                st.error("AIが回答を拒否しました（不適切なコンテンツと判定された可能性があります）。")
+            if "candidates" not in result_json:
+                st.error("AIからの応答が空でした。")
                 return None
                 
             text_response = result_json["candidates"][0]["content"]["parts"][0]["text"]
@@ -142,7 +96,7 @@ def analyze_food(text_or_image):
             if match_s: return [json.loads(match_s.group(0))]
             return None
         except Exception as e:
-            st.error(f"解析エラー: {e}")
+            st.error(f"データ解析エラー: {e}")
             return None
 
     except Exception as e:
@@ -204,7 +158,7 @@ def main():
     init_db()
     if 'draft_data' not in st.session_state: st.session_state['draft_data'] = None
 
-    st.title("🥗 BodyLog AI (Free)")
+    st.title("🥗 BodyLog AI (Direct)")
 
     # --- サイドバー ---
     with st.sidebar:
@@ -325,7 +279,7 @@ def main():
     with tab2:
         favs = get_db("SELECT * FROM favorites")
         if not favs.empty:
-            sel_fav = st.selectbox("My Menu", favs['name'])
+            sel_fav = st.selectbox("マイメニュー", favs['name'])
             target = favs[favs['name'] == sel_fav].iloc[0]
             st.success(f"{target['name']} : {int(target['kcal'])}kcal")
             if st.button("これ食べた！ (追加)"):
