@@ -9,6 +9,7 @@ import pandas as pd
 from PIL import Image
 import io
 import base64
+import time
 
 # ==========================================
 # 🔑 APIキー設定
@@ -18,8 +19,122 @@ try:
 except:
     API_KEY = ""
 
-# 🟢 【確定】診断で判明した「正解のモデル名」を使用
-MODEL_NAME = "models/gemini-2.5-flash"
+# ==========================================
+# 🧠 AI解析ロジック (総当たり・完全版)
+# ==========================================
+def analyze_food(text_or_image):
+    if not API_KEY:
+        st.error("SecretsにAPIキーが設定されていません。")
+        return None
+
+    # 🟢 【戦略】使える可能性のあるモデルを優先順位順に並べる
+    # 1. gemini-1.5-flash: 本命（制限が緩い・標準）
+    # 2. gemini-2.5-flash: 診断で動いた実績あり（ただし制限きつい）
+    # 3. gemini-1.5-flash-8b: 軽量版（制限かかりにくい）
+    # 4. gemini-1.5-pro: 高性能版（おまけ）
+    
+    candidate_models = [
+        "models/gemini-1.5-flash",
+        "models/gemini-2.5-flash",
+        "models/gemini-1.5-flash-8b",
+        "models/gemini-1.5-pro"
+    ]
+
+    headers = {"Content-Type": "application/json"}
+
+    # プロンプト
+    system_instruction = """
+    Analyze food items. Estimate Calories, Protein(P), Fat(F), Carbs(C).
+    If specific values are given (e.g. "Protein 20g"), use them.
+    Output ONLY a JSON list:
+    [{"food_name": "Item Name", "calories": 0, "protein": 0, "fat": 0, "carbs": 0}]
+    """
+
+    # ペイロード作成
+    payload = {}
+    if isinstance(text_or_image, str):
+        payload = {"contents": [{"parts": [{"text": f"Input: {text_or_image}. {system_instruction}"}]}]}
+    else:
+        buffered = io.BytesIO()
+        text_or_image.save(buffered, format="JPEG")
+        img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+        payload = {
+            "contents": [{
+                "parts": [
+                    {"text": system_instruction},
+                    {"inline_data": {"mime_type": "image/jpeg", "data": img_str}}
+                ]
+            }]
+        }
+
+    # 🔄 総当たりループ開始
+    last_error_msg = ""
+    
+    status_placeholder = st.empty() # 進捗表示用
+
+    for model in candidate_models:
+        # URL構築
+        url = f"https://generativelanguage.googleapis.com/v1beta/{model}:generateContent?key={API_KEY}"
+        
+        try:
+            # 試行中のモデルを表示（一瞬で消えます）
+            # status_placeholder.text(f"接続試行中: {model} ...")
+            
+            response = requests.post(url, headers=headers, data=json.dumps(payload))
+            
+            # --- エラー判定 ---
+            
+            # 404 (Not Found): モデルがない -> 次のモデルへ
+            if response.status_code == 404:
+                continue 
+            
+            # 429 (Too Many Requests): 制限オーバー -> 次のモデルへ（別のモデルなら枠が空いてる可能性があるため）
+            if response.status_code == 429:
+                last_error_msg = "無料枠の上限（速度制限）に達しました。"
+                continue
+
+            # 400番台その他、500番台: APIキー間違いなど -> ループ終了
+            if response.status_code != 200:
+                st.error(f"Error ({model}): {response.text}")
+                return None
+
+            # --- 成功時 (200 OK) ---
+            result_json = response.json()
+            
+            # 成功したけど中身が空の場合（不適切コンテンツ判定など）
+            if "candidates" not in result_json:
+                continue
+
+            text_response = result_json["candidates"][0]["content"]["parts"][0]["text"]
+            
+            # JSON抽出
+            match = re.search(r'\[.*\]', text_response, re.DOTALL)
+            if match: 
+                status_placeholder.empty() # メッセージ消す
+                # st.success(f"成功 ({model})") # デバッグ用（消してもOK）
+                return json.loads(match.group(0))
+            
+            match_s = re.search(r'\{.*\}', text_response, re.DOTALL)
+            if match_s: 
+                status_placeholder.empty()
+                return [json.loads(match_s.group(0))]
+            
+            # JSON解析できなければ次へ
+            continue
+
+        except Exception as e:
+            last_error_msg = str(e)
+            continue
+
+    # ループを抜けてもリターンしていない＝全滅
+    status_placeholder.empty()
+    if "無料枠" in last_error_msg:
+        st.warning("⚠️ 全てのモデルで速度制限(429)がかかりました。1〜2分待ってから再試行してください。")
+    else:
+        st.error(f"解析に失敗しました。詳細: {last_error_msg}")
+        st.info("ヒント: 別の写真で試すか、テキスト入力を使ってみてください。")
+        
+    return None
 
 # ==========================================
 # 🎨 UIデザイン
@@ -70,72 +185,6 @@ def get_db(query, args=()):
     return df
 
 # ==========================================
-# 🧠 AI解析ロジック (REST API直通・確定版)
-# ==========================================
-def analyze_food(text_or_image):
-    if not API_KEY:
-        st.error("SecretsにAPIキーが設定されていません。")
-        return None
-
-    # URL構築
-    url = f"https://generativelanguage.googleapis.com/v1beta/{MODEL_NAME}:generateContent?key={API_KEY}"
-    headers = {"Content-Type": "application/json"}
-
-    # プロンプト
-    system_instruction = """
-    Analyze food items. Estimate Calories, Protein(P), Fat(F), Carbs(C).
-    If specific values are given (e.g. "Protein 20g"), use them.
-    Output ONLY a JSON list:
-    [{"food_name": "Item Name", "calories": 0, "protein": 0, "fat": 0, "carbs": 0}]
-    """
-
-    # データ作成
-    payload = {}
-    if isinstance(text_or_image, str):
-        payload = {"contents": [{"parts": [{"text": f"Input: {text_or_image}. {system_instruction}"}]}]}
-    else:
-        buffered = io.BytesIO()
-        text_or_image.save(buffered, format="JPEG")
-        img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
-        payload = {
-            "contents": [{
-                "parts": [
-                    {"text": system_instruction},
-                    {"inline_data": {"mime_type": "image/jpeg", "data": img_str}}
-                ]
-            }]
-        }
-
-    try:
-        response = requests.post(url, headers=headers, data=json.dumps(payload))
-        
-        if response.status_code != 200:
-            st.error(f"AI Error ({response.status_code}): {response.text}")
-            return None
-
-        result_json = response.json()
-        try:
-            if "candidates" not in result_json:
-                st.error("AIからの応答が空でした。")
-                return None
-                
-            text_response = result_json["candidates"][0]["content"]["parts"][0]["text"]
-            match = re.search(r'\[.*\]', text_response, re.DOTALL)
-            if match: return json.loads(match.group(0))
-            
-            match_s = re.search(r'\{.*\}', text_response, re.DOTALL)
-            if match_s: return [json.loads(match_s.group(0))]
-            
-            return None
-        except Exception as e:
-            st.error(f"解析エラー: {e}")
-            return None
-
-    except Exception as e:
-        st.error(f"通信エラー: {e}")
-        return None
-
-# ==========================================
 # 📱 アプリメイン処理
 # ==========================================
 def main():
@@ -146,7 +195,7 @@ def main():
 
     # --- サイドバー ---
     with st.sidebar:
-        st.header("⚙️ 設定")
+        st.header("⚙️ Config")
         current_weight = st.number_input("体重 (kg)", 30.0, 150.0, 65.0)
         
         with st.expander("詳細設定", expanded=False):
@@ -209,7 +258,7 @@ def main():
     # --- タブ ---
     tab1, tab2, tab3, tab4 = st.tabs(["📝 記録", "⭐️ 定番", "📊 分析", "🗑️ 履歴"])
 
-    # Tab 1: AI記録 (修正機能付き)
+    # Tab 1: AI記録
     with tab1:
         if st.session_state['draft_data'] is None:
             in_mode = st.radio("入力モード", ["文字", "写真"], horizontal=True)
@@ -217,7 +266,7 @@ def main():
             if in_mode == "文字":
                 txt_in = st.text_input("食事内容", placeholder="例: 牛丼と卵")
                 if st.button("AI解析", type="primary") and txt_in:
-                    with st.spinner("AIが計算中..."):
+                    with st.spinner("AIが考え中..."):
                         res = analyze_food(txt_in)
                         if res:
                             st.session_state['draft_data'] = res
@@ -232,7 +281,6 @@ def main():
                             st.session_state['draft_data'] = res
                             st.rerun()
         else:
-            # Human-in-the-loop: 編集画面
             st.info("内容を確認して保存してください")
             with st.form("edit_form"):
                 edited_items = []
